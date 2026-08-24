@@ -423,7 +423,7 @@ export default function Home() {
                   setApiKeySaved(false);
                 }}
                 onBlur={handleSaveApiKey}
-                placeholder={PROVIDER_KEY_PLACEHOLDERS[provider]}
+                placeholder={provider ? PROVIDER_KEY_PLACEHOLDERS[provider] : 'API Key...'}
                 className="w-full rounded-md border border-slate-700 bg-slate-800/90 px-2.5 py-1.5 pr-8 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-1 focus:ring-sky-500 font-mono"
               />
               <button
