@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: aider-web
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: AIDER_TIMEOUT_MS
+        value: "300000"
+      - key: CORS_ORIGIN
+        value: "*"

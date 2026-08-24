@@ -21,8 +21,9 @@ export interface CoderRequest {
   provider?: string;
 }
 
-const DEFAULT_BACKEND_URL =
-  process.env.NEXT_PUBLIC_BACKEND_URL || 'http://localhost:10000';
+// In the unified Render deployment, the reverse proxy exposes the API on the same origin.
+// Keep the environment override for local development and legacy deployments.
+const DEFAULT_BACKEND_URL = process.env.NEXT_PUBLIC_BACKEND_URL || '';
 
 export async function sendCoderRequest(
   data: CoderRequest,
