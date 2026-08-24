@@ -1,13 +1,14 @@
-#!/bin/sh
+#!/bin/bash
 set -eu
 
 PORT=10001 node backend/server.js &
 BACKEND_PID=$!
+
 npm run start -- --hostname 0.0.0.0 --port 3000 &
 NEXT_PID=$!
 
 cleanup() {
-  kill "$BACKEND_PID" "$NEXT_PID" 2>/dev/null || true
+  kill "$BACKEND_PID" "$NEXT_PID" "${NGINX_PID:-}" 2>/dev/null || true
 }
 trap cleanup INT TERM EXIT
 
