@@ -387,7 +387,7 @@ app.post('/api/coder', async (req, res) => {
     }
     ensureGitRepo(workspacePath);
 
-    const selectedModel = (model && typeof model === 'string') ? model : 'openrouter/deepseek/deepseek-r1:free';
+    const selectedModel = (model && typeof model === 'string') ? model : 'openrouter/qwen/qwen-2.5-coder-32b-instruct:free';
     const selectedProvider = (provider && typeof provider === 'string') ? provider : 'openrouter';
 
     const result = await runAider(workspacePath, prompt.trim(), (apiKey || '').trim(), selectedModel, selectedProvider);
@@ -398,7 +398,7 @@ app.post('/api/coder', async (req, res) => {
     } catch (err) {}
 
     const succeeded = result.exitCode === 0;
-    return res.status(succeeded ? 200 : 502).json({
+    return res.status(200).json({
       success: succeeded,
       exitCode: result.exitCode,
       logs: result.stdout,
