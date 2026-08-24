@@ -720,7 +720,7 @@ export default function Home() {
             </div>
             <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-400 px-1">
               <span>Press <kbd className="rounded bg-slate-800 px-1 py-0.5 font-mono text-[10px] text-slate-300">Ctrl+Enter</kbd> to execute changes</span>
-              {!apiKey.trim() && !isFreeModel(model) && provider !== 'google' && (
+              {!apiKey.trim() && !isFreeModel(model) && (provider as string) !== 'google' && (
                 <span className="text-amber-400">
                   Tip: Provide an API key in the sidebar or pick a free model.
                 </span>
