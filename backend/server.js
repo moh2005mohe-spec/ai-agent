@@ -1,12 +1,11 @@
 const express = require('express');
 const cors = require('cors');
-const { spawn } = require('child_process');
+const { spawn, execSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
 const app = express();
-
 const PORT = process.env.PORT || 10000;
 const WORKSPACE_ROOT = path.join(__dirname, 'workspaces');
 
@@ -14,7 +13,7 @@ if (!fs.existsSync(WORKSPACE_ROOT)) {
   fs.mkdirSync(WORKSPACE_ROOT, { recursive: true });
 }
 
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 
 const rawCorsOrigin = (process.env.CORS_ORIGIN || '*').trim();
@@ -23,10 +22,7 @@ const allowedOrigins = rawCorsOrigin
   .map((o) => o.trim())
   .filter(Boolean);
 
-// If CORS_ORIGIN is '*' (default), allow all origins without throwing.
-// If specific origins are listed, only those are allowed.
 const allowAll = allowedOrigins.includes('*');
-
 const corsOptions = {
   origin(origin, cb) {
     if (allowAll || !origin || allowedOrigins.includes(origin)) {
@@ -38,10 +34,10 @@ const corsOptions = {
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
 };
+
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
 
-/* ---- Root route: simple status page so visiting the URL in a browser works ---- */
 app.get('/', (_req, res) => {
   res.status(200).json({
     name: 'Aider Web Backend',
@@ -50,6 +46,9 @@ app.get('/', (_req, res) => {
       health: 'GET /api/health',
       coder: 'POST /api/coder',
       files: 'GET /api/files/:userId',
+      gitClone: 'POST /api/git/clone',
+      gitStatus: 'GET /api/git/status/:userId',
+      gitPush: 'POST /api/git/push',
     },
     timestamp: new Date().toISOString(),
   });
@@ -73,11 +72,22 @@ function getWorkspacePath(userId) {
 
 function readAllFiles(dir, baseDir = dir) {
   const files = [];
+  if (!fs.existsSync(dir)) return files;
+
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const fullPath = path.join(dir, entry.name);
     const relativePath = path.relative(baseDir, fullPath);
     if (entry.isDirectory()) {
-      if (entry.name === '.git' || entry.name === 'node_modules' || entry.name === '__pycache__') continue;
+      if (
+        entry.name === '.git' ||
+        entry.name === 'node_modules' ||
+        entry.name === '__pycache__' ||
+        entry.name === '.next' ||
+        entry.name === 'dist' ||
+        entry.name === '.cache'
+      ) {
+        continue;
+      }
       files.push(...readAllFiles(fullPath, baseDir));
     } else {
       try {
@@ -100,18 +110,184 @@ function readAllFiles(dir, baseDir = dir) {
 function ensureGitRepo(workspacePath) {
   if (!fs.existsSync(path.join(workspacePath, '.git'))) {
     try {
-      const { execSync } = require('child_process');
       execSync('git init', { cwd: workspacePath, timeout: 10000 });
-      execSync('git config user.email "aider@local"', { cwd: workspacePath, timeout: 5000 });
-      execSync('git config user.name "Aider Bot"', { cwd: workspacePath, timeout: 5000 });
+      execSync('git config user.email "agent@aider-web.local"', { cwd: workspacePath, timeout: 5000 });
+      execSync('git config user.name "AI Coding Agent"', { cwd: workspacePath, timeout: 5000 });
     } catch {
-      // Git init failure is non-fatal; Aider can still run without a repo
+      // Non-fatal
     }
   }
 }
 
-/* ---- Provider-aware Aider runner ---- */
-// provider: 'anthropic' | 'openai' | 'openrouter' | 'deepseek' | 'openrouter'
+// Git Endpoints
+app.post('/api/git/clone', async (req, res) => {
+  try {
+    const { userId, repoUrl, token, branch } = req.body;
+    if (!repoUrl || typeof repoUrl !== 'string') {
+      return res.status(400).json({ error: 'GitHub repository URL is required.' });
+    }
+    const safeUserId = sanitizeUserId(userId) || 'user-default';
+    const workspacePath = getWorkspacePath(safeUserId);
+
+    let authenticatedUrl = repoUrl.trim();
+    if (token && token.trim()) {
+      const cleanToken = token.trim();
+      if (authenticatedUrl.startsWith('https://')) {
+        authenticatedUrl = authenticatedUrl.replace('https://', `https://${cleanToken}@`);
+      }
+    }
+
+    if (fs.existsSync(workspacePath)) {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
+    fs.mkdirSync(workspacePath, { recursive: true });
+
+    const branchArg = branch ? `--branch ${branch.trim()}` : '';
+    const cloneCommand = `git clone --depth 1 ${branchArg} "${authenticatedUrl}" .`;
+
+    execSync(cloneCommand, {
+      cwd: workspacePath,
+      timeout: 60000,
+      stdio: 'pipe',
+    });
+
+    try {
+      execSync('git config user.email "agent@aider-web.local"', { cwd: workspacePath, timeout: 5000 });
+      execSync('git config user.name "AI Coding Agent"', { cwd: workspacePath, timeout: 5000 });
+    } catch {
+      // Non-fatal
+    }
+
+    const files = readAllFiles(workspacePath);
+    let currentBranch = 'main';
+    try {
+      currentBranch = execSync('git branch --show-current', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+    } catch {
+      // Non-fatal
+    }
+
+    return res.json({
+      success: true,
+      message: `Successfully cloned ${repoUrl}`,
+      branch: currentBranch,
+      filesCount: files.length,
+      files,
+    });
+  } catch (err) {
+    console.error('Git clone error:', err);
+    return res.status(500).json({
+      error: 'Failed to clone repository from GitHub.',
+      details: err.stderr ? err.stderr.toString() : err.message,
+    });
+  }
+});
+
+app.get('/api/git/status/:userId', (req, res) => {
+  const safeUserId = sanitizeUserId(req.params.userId) || 'user-default';
+  const workspacePath = getWorkspacePath(safeUserId);
+
+  if (!fs.existsSync(workspacePath) || !fs.existsSync(path.join(workspacePath, '.git'))) {
+    return res.json({ isRepo: false });
+  }
+
+  try {
+    const statusOutput = execSync('git status --porcelain', { cwd: workspacePath, encoding: 'utf-8' });
+    let currentBranch = 'main';
+    try {
+      currentBranch = execSync('git branch --show-current', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+    } catch {}
+
+    let remoteUrl = '';
+    try {
+      remoteUrl = execSync('git config --get remote.origin.url', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+      remoteUrl = remoteUrl.replace(/https:\/\/[^@]+@/, 'https://');
+    } catch {}
+
+    const lines = statusOutput.split('\n').filter(Boolean);
+    const modifiedFiles = lines.map((l) => l.trim());
+
+    return res.json({
+      isRepo: true,
+      currentBranch,
+      remoteUrl,
+      modifiedFiles,
+      hasChanges: modifiedFiles.length > 0,
+    });
+  } catch (err) {
+    return res.status(500).json({ error: 'Failed to get git status', details: err.message });
+  }
+});
+
+app.post('/api/git/push', async (req, res) => {
+  try {
+    const { userId, commitMessage, token, branch, email, name, repoUrl } = req.body;
+    const safeUserId = sanitizeUserId(userId) || 'user-default';
+    const workspacePath = getWorkspacePath(safeUserId);
+
+    if (!fs.existsSync(workspacePath) || !fs.existsSync(path.join(workspacePath, '.git'))) {
+      return res.status(400).json({ error: 'Workspace is not a git repository.' });
+    }
+
+    const authorEmail = email || 'agent@aider-web.local';
+    const authorName = name || 'AI Coding Agent';
+    const msg = commitMessage || 'feat: automated changes by AI Coding Agent';
+
+    execSync(`git config user.email "${authorEmail}"`, { cwd: workspacePath, timeout: 5000 });
+    execSync(`git config user.name "${authorName}"`, { cwd: workspacePath, timeout: 5000 });
+
+    execSync('git add -A', { cwd: workspacePath, timeout: 10000 });
+
+    try {
+      execSync(`git commit -m "${msg.replace(/"/g, "'")}"`, { cwd: workspacePath, timeout: 10000 });
+    } catch {
+      // Nothing to commit
+    }
+
+    let targetBranch = branch;
+    if (!targetBranch) {
+      try {
+        targetBranch = execSync('git branch --show-current', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+      } catch {
+        targetBranch = 'main';
+      }
+    }
+
+    if (token && token.trim()) {
+      let remote = repoUrl;
+      if (!remote) {
+        try {
+          remote = execSync('git config --get remote.origin.url', { cwd: workspacePath, encoding: 'utf-8' }).trim();
+        } catch {}
+      }
+      if (remote) {
+        let authRemote = remote.trim();
+        if (authRemote.startsWith('https://')) {
+          authRemote = authRemote.replace(/https:\/\/[^@]*@?/, `https://${token.trim()}@`);
+        }
+        execSync(`git remote set-url origin "${authRemote}"`, { cwd: workspacePath, timeout: 5000 });
+      }
+    }
+
+    const pushOutput = execSync(`git push origin ${targetBranch}`, {
+      cwd: workspacePath,
+      encoding: 'utf-8',
+      timeout: 45000,
+    });
+
+    return res.json({
+      success: true,
+      message: `Successfully pushed changes to branch '${targetBranch}' on GitHub.`,
+      details: pushOutput,
+    });
+  } catch (err) {
+    console.error('Git push error:', err);
+    return res.status(500).json({
+      error: 'Failed to push changes to GitHub.',
+      details: err.stderr ? err.stderr.toString() : err.message,
+    });
+  }
+});
+
 function runAider(workspacePath, prompt, apiKey, model, provider) {
   return new Promise((resolve, reject) => {
     const timeoutMs = Number(process.env.AIDER_TIMEOUT_MS || 300000);
@@ -123,7 +299,6 @@ function runAider(workspacePath, prompt, apiKey, model, provider) {
       DEEPSEEK_API_KEY: '',
     };
 
-    // Set the right env var based on provider
     switch (provider) {
       case 'anthropic':
         env.ANTHROPIC_API_KEY = apiKey;
@@ -138,7 +313,6 @@ function runAider(workspacePath, prompt, apiKey, model, provider) {
         env.DEEPSEEK_API_KEY = apiKey;
         break;
       default:
-        // Fallback: try to detect from model name
         if (model.startsWith('claude')) {
           env.ANTHROPIC_API_KEY = apiKey;
         } else if (model.startsWith('deepseek')) {
@@ -150,9 +324,7 @@ function runAider(workspacePath, prompt, apiKey, model, provider) {
         }
     }
 
-    // Aider uses the `openrouter/` prefix to route through OpenRouter
     const aiderModel = model;
-
     const args = [
       '--model', aiderModel,
       '--yes',
@@ -160,7 +332,7 @@ function runAider(workspacePath, prompt, apiKey, model, provider) {
       '--message', prompt,
     ];
 
-    const aider = spawn('python3', ['-m', 'aider'], {
+    const aider = spawn('python3', ['-m', 'aider', ...args], {
       cwd: workspacePath,
       env,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -206,36 +378,24 @@ app.post('/api/coder', async (req, res) => {
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length === 0) {
       return res.status(400).json({ error: 'A prompt is required.' });
     }
-    if (!apiKey || typeof apiKey !== 'string' || apiKey.trim().length === 0) {
-      return res.status(400).json({ error: 'An API key is required.' });
-    }
-    if (!userId || typeof userId !== 'string') {
-      return res.status(400).json({ error: 'A userId is required.' });
-    }
 
-    const safeUserId = sanitizeUserId(userId);
-    if (!safeUserId) {
-      return res.status(400).json({ error: 'Invalid userId.' });
-    }
-
+    const safeUserId = sanitizeUserId(userId) || 'user-default';
     const workspacePath = getWorkspacePath(safeUserId);
+
     if (!fs.existsSync(workspacePath)) {
       fs.mkdirSync(workspacePath, { recursive: true });
     }
-
     ensureGitRepo(workspacePath);
 
-    const selectedModel = (model && typeof model === 'string') ? model : 'claude-3-5-sonnet-20241022';
-    const selectedProvider = (provider && typeof provider === 'string') ? provider : null;
+    const selectedModel = (model && typeof model === 'string') ? model : 'openrouter/deepseek/deepseek-r1:free';
+    const selectedProvider = (provider && typeof provider === 'string') ? provider : 'openrouter';
 
-    const result = await runAider(workspacePath, prompt.trim(), apiKey.trim(), selectedModel, selectedProvider);
+    const result = await runAider(workspacePath, prompt.trim(), (apiKey || '').trim(), selectedModel, selectedProvider);
 
     let files = [];
     try {
       files = readAllFiles(workspacePath);
-    } catch (err) {
-      // workspace might be empty or have permission issues
-    }
+    } catch (err) {}
 
     const succeeded = result.exitCode === 0;
     return res.status(succeeded ? 200 : 502).json({
